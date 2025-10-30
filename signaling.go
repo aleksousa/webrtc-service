@@ -113,15 +113,21 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request, roomManager *RoomMa
 			// IMPORTANTE: Adicionar tracks existentes de outros peers ANTES de criar answer
 			// Isso garante que a answer inclui todos os tracks
 			otherPeers := room.GetPeers(peer.ID)
-			log.Printf("Adicionando %d peers existentes para %s", len(otherPeers), peer.Name)
+			log.Printf("========== Adicionando tracks existentes para %s ==========", peer.Name)
+			log.Printf("Número de outros peers na sala: %d", len(otherPeers))
 
+			totalTracks := 0
 			for _, otherPeer := range otherPeers {
 				broadcasters := otherPeer.GetBroadcasters()
-				for _, broadcaster := range broadcasters {
-					log.Printf("Adicionando track de %s para %s", otherPeer.Name, peer.Name)
+				log.Printf("Peer %s tem %d broadcasters", otherPeer.Name, len(broadcasters))
+				for i, broadcaster := range broadcasters {
+					log.Printf("Adicionando track %d de %s para %s", i+1, otherPeer.Name, peer.Name)
 					peer.AddBroadcaster(broadcaster)
+					totalTracks++
 				}
 			}
+			log.Printf("Total de tracks adicionados para %s: %d", peer.Name, totalTracks)
+			log.Printf("=============================================================")
 
 			// Criar resposta (agora inclui todos os tracks adicionados)
 			answer, err := peer.PeerConnection.CreateAnswer(nil)

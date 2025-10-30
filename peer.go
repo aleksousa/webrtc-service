@@ -80,7 +80,8 @@ func NewPeer(id, name string, room *Room, ws *websocket.Conn) (*Peer, error) {
 
 	// Handler para quando recebemos um track (áudio) do peer
 	peerConnection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
-		log.Printf("Recebido track de %s (tipo: %s)", peer.Name, track.Kind())
+		log.Printf("========== OnTrack chamado para %s ==========", peer.Name)
+		log.Printf("Tipo de track: %s", track.Kind())
 
 		// Criar um broadcaster para este track (lê UMA vez e distribui para todos)
 		broadcaster := NewTrackBroadcaster(track)
@@ -88,10 +89,15 @@ func NewPeer(id, name string, room *Room, ws *websocket.Conn) (*Peer, error) {
 		// Armazenar o broadcaster
 		peer.tracksMu.Lock()
 		peer.broadcasters = append(peer.broadcasters, broadcaster)
+		numBroadcasters := len(peer.broadcasters)
 		peer.tracksMu.Unlock()
 
+		log.Printf("Peer %s agora tem %d broadcaster(s)", peer.Name, numBroadcasters)
+
 		// Broadcast do broadcaster para todos os outros peers na sala
+		log.Printf("Iniciando broadcast do track de %s para outros peers", peer.Name)
 		room.BroadcastTrack(peer.ID, broadcaster)
+		log.Printf("================================================")
 	})
 
 	// Handler para ICE candidates
@@ -130,6 +136,8 @@ func NewPeer(id, name string, room *Room, ws *websocket.Conn) (*Peer, error) {
 
 // AddBroadcaster adiciona um broadcaster ao peer (encaminha áudio de outro participante)
 func (p *Peer) AddBroadcaster(broadcaster *TrackBroadcaster) {
+	log.Printf(">>> AddBroadcaster chamado para peer %s <<<", p.Name)
+
 	// Criar um track local para enviar ao peer
 	localTrack, err := webrtc.NewTrackLocalStaticRTP(
 		broadcaster.remoteTrack.Codec().RTPCodecCapability,
@@ -148,7 +156,7 @@ func (p *Peer) AddBroadcaster(broadcaster *TrackBroadcaster) {
 		return
 	}
 
-	log.Printf("Track adicionado ao peer %s (estado: %s)", p.Name, p.PeerConnection.ConnectionState())
+	log.Printf("Track adicionado com sucesso ao peer %s (estado: %s)", p.Name, p.PeerConnection.ConnectionState())
 
 	// Processar RTCP packets
 	go func() {
@@ -163,17 +171,24 @@ func (p *Peer) AddBroadcaster(broadcaster *TrackBroadcaster) {
 
 	// Adicionar o track local ao broadcaster (broadcaster distribui os pacotes)
 	broadcaster.AddTrackLocal(localTrack)
+	log.Printf("Track local registrado no broadcaster para %s", p.Name)
 
 	// Se já temos uma conexão estabelecida, precisamos renegociar
 	state := p.PeerConnection.ConnectionState()
+	log.Printf("Estado da conexão de %s: %s", p.Name, state.String())
+
 	if state == webrtc.PeerConnectionStateConnected {
-		log.Printf("Iniciando renegociação para peer %s", p.Name)
+		log.Printf(">>> Conexão já estabelecida! Iniciando renegociação para peer %s <<<", p.Name)
 		go p.Renegotiate() // Executar em goroutine para não bloquear
+	} else {
+		log.Printf(">>> Conexão de %s ainda não estabelecida (%s), renegociação não necessária <<<", p.Name, state.String())
 	}
 }
 
 // Renegotiate cria uma nova oferta para renegociar a conexão
 func (p *Peer) Renegotiate() {
+	log.Printf("***** RENEGOTIATE INICIADA PARA %s *****", p.Name)
+
 	// Evitar renegociações concorrentes
 	p.negotiatingMu.Lock()
 	if p.isNegotiating {
@@ -188,6 +203,7 @@ func (p *Peer) Renegotiate() {
 		p.negotiatingMu.Lock()
 		p.isNegotiating = false
 		p.negotiatingMu.Unlock()
+		log.Printf("***** RENEGOTIATE FINALIZADA PARA %s *****", p.Name)
 	}()
 
 	log.Printf("Criando offer de renegociação para %s", p.Name)

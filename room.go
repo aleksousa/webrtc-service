@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log"
 	"sync"
 )
 
@@ -74,9 +75,13 @@ func (r *Room) BroadcastTrack(senderID string, broadcaster *TrackBroadcaster) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	recipients := 0
 	for id, peer := range r.peers {
 		if id != senderID {
+			log.Printf("Enviando broadcaster para peer %s (estado: %s)", peer.Name, peer.PeerConnection.ConnectionState())
 			peer.AddBroadcaster(broadcaster)
+			recipients++
 		}
 	}
+	log.Printf("Broadcaster enviado para %d peer(s)", recipients)
 }
