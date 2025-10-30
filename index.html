@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC SFU - Sala de Áudio</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            color: #555;
+            font-weight: bold;
+        }
+        input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 16px;
+            box-sizing: border-box;
+        }
+        button {
+            width: 100%;
+            padding: 12px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            font-size: 16px;
+            cursor: pointer;
+            margin-top: 10px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+        #leaveBtn {
+            background-color: #f44336;
+        }
+        #leaveBtn:hover {
+            background-color: #da190b;
+        }
+        .status {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 5px;
+            background-color: #e3f2fd;
+            border-left: 4px solid #2196F3;
+        }
+        .status.connected {
+            background-color: #e8f5e9;
+            border-left-color: #4CAF50;
+        }
+        .status.error {
+            background-color: #ffebee;
+            border-left-color: #f44336;
+        }
+        #participants {
+            margin-top: 20px;
+        }
+        .participant {
+            padding: 10px;
+            margin: 5px 0;
+            background-color: #f5f5f5;
+            border-radius: 5px;
+        }
+        #audioContainer {
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>WebRTC SFU - Sala de Áudio</h1>
+
+        <div id="joinForm">
+            <div class="form-group">
+                <label for="name">Seu Nome:</label>
+                <input type="text" id="name" placeholder="Digite seu nome">
+            </div>
+
+            <div class="form-group">
+                <label for="roomId">Código da Sala:</label>
+                <input type="text" id="roomId" placeholder="Digite o código da sala">
+            </div>
+
+            <button id="joinBtn">Entrar na Sala</button>
+        </div>
+
+        <div id="roomControls" style="display: none;">
+            <button id="leaveBtn">Sair da Sala</button>
+        </div>
+
+        <div id="status"></div>
+
+        <div id="participants"></div>
+        <div id="audioContainer"></div>
+    </div>
+
+    <script>
+        let ws = null;
+        let peerConnection = null;
+        let localStream = null;
+
+        const joinBtn = document.getElementById('joinBtn');
+        const leaveBtn = document.getElementById('leaveBtn');
+        const nameInput = document.getElementById('name');
+        const roomIdInput = document.getElementById('roomId');
+        const joinForm = document.getElementById('joinForm');
+        const roomControls = document.getElementById('roomControls');
+        const statusDiv = document.getElementById('status');
+        const audioContainer = document.getElementById('audioContainer');
+
+        // Configuração do WebRTC
+        const config = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' }
+            ]
+        };
+
+        function updateStatus(message, type = 'info') {
+            statusDiv.textContent = message;
+            statusDiv.className = 'status ' + type;
+        }
+
+        async function joinRoom() {
+            const name = nameInput.value.trim();
+            const roomId = roomIdInput.value.trim();
+
+            if (!name || !roomId) {
+                alert('Por favor, preencha seu nome e o código da sala');
+                return;
+            }
+
+            try {
+                updateStatus('Conectando ao servidor...', 'info');
+
+                // Conectar ao WebSocket
+                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+
+                ws.onopen = async () => {
+                    updateStatus('Obtendo acesso ao microfone...', 'info');
+
+                    // Obter stream de áudio local
+                    localStream = await navigator.mediaDevices.getUserMedia({
+                        audio: true,
+                        video: false
+                    });
+
+                    // Criar PeerConnection
+                    peerConnection = new RTCPeerConnection(config);
+
+                    // Adicionar tracks locais
+                    localStream.getTracks().forEach(track => {
+                        peerConnection.addTrack(track, localStream);
+                    });
+
+                    // Handler para tracks remotos
+                    peerConnection.ontrack = (event) => {
+                        console.log('Recebido track remoto');
+                        const audio = document.createElement('audio');
+                        audio.srcObject = event.streams[0];
+                        audio.autoplay = true;
+                        audioContainer.appendChild(audio);
+                    };
+
+                    // Handler para ICE candidates
+                    peerConnection.onicecandidate = (event) => {
+                        if (event.candidate) {
+                            ws.send(JSON.stringify({
+                                type: 'candidate',
+                                data: JSON.stringify(event.candidate)
+                            }));
+                        }
+                    };
+
+                    // Criar e enviar oferta
+                    const offer = await peerConnection.createOffer();
+                    await peerConnection.setLocalDescription(offer);
+
+                    // Enviar mensagem de entrada na sala
+                    ws.send(JSON.stringify({
+                        type: 'join',
+                        data: JSON.stringify({ name, roomId })
+                    }));
+                };
+
+                ws.onmessage = async (event) => {
+                    const message = JSON.parse(event.data);
+
+                    switch (message.type) {
+                        case 'joined':
+                            updateStatus(`Conectado à sala ${roomId}`, 'connected');
+                            joinForm.style.display = 'none';
+                            roomControls.style.display = 'block';
+
+                            // Enviar oferta após confirmar entrada
+                            const offer = peerConnection.localDescription;
+                            ws.send(JSON.stringify({
+                                type: 'offer',
+                                data: JSON.stringify(offer)
+                            }));
+                            break;
+
+                        case 'answer':
+                            const answer = JSON.parse(message.data);
+                            await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+                            break;
+
+                        case 'offer':
+                            const remoteOffer = JSON.parse(message.data);
+                            await peerConnection.setRemoteDescription(new RTCSessionDescription(remoteOffer));
+                            const answerDesc = await peerConnection.createAnswer();
+                            await peerConnection.setLocalDescription(answerDesc);
+                            ws.send(JSON.stringify({
+                                type: 'answer',
+                                data: JSON.stringify(answerDesc)
+                            }));
+                            break;
+
+                        case 'candidate':
+                            const candidate = JSON.parse(message.data);
+                            await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+                            break;
+
+                        case 'peer-joined':
+                            updateStatus(`${message.data} entrou na sala`, 'connected');
+                            break;
+                    }
+                };
+
+                ws.onerror = (error) => {
+                    console.error('Erro no WebSocket:', error);
+                    updateStatus('Erro na conexão', 'error');
+                };
+
+                ws.onclose = () => {
+                    updateStatus('Desconectado', 'error');
+                    cleanup();
+                };
+
+            } catch (error) {
+                console.error('Erro ao entrar na sala:', error);
+                updateStatus('Erro ao entrar na sala: ' + error.message, 'error');
+            }
+        }
+
+        function leaveRoom() {
+            cleanup();
+            joinForm.style.display = 'block';
+            roomControls.style.display = 'none';
+            updateStatus('', 'info');
+        }
+
+        function cleanup() {
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+                localStream = null;
+            }
+
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
+
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+
+            audioContainer.innerHTML = '';
+        }
+
+        joinBtn.addEventListener('click', joinRoom);
+        leaveBtn.addEventListener('click', leaveRoom);
+
+        // Cleanup ao fechar a página
+        window.addEventListener('beforeunload', cleanup);
+    </script>
+</body>
+</html>
