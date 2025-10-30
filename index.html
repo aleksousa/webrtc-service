@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="pt-BR">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WebRTC SFU - Sala de Áudio</title>
+    <title>WebRTC SFU - Audio Room</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -78,15 +78,6 @@
             background-color: #ffebee;
             border-left-color: #f44336;
         }
-        #participants {
-            margin-top: 20px;
-        }
-        .participant {
-            padding: 10px;
-            margin: 5px 0;
-            background-color: #f5f5f5;
-            border-radius: 5px;
-        }
         #audioContainer {
             margin-top: 20px;
         }
@@ -94,29 +85,27 @@
 </head>
 <body>
     <div class="container">
-        <h1>WebRTC SFU - Sala de Áudio</h1>
+        <h1>WebRTC SFU - Audio Room</h1>
 
         <div id="joinForm">
             <div class="form-group">
-                <label for="name">Seu Nome:</label>
-                <input type="text" id="name" placeholder="Digite seu nome">
+                <label for="name">Your Name:</label>
+                <input type="text" id="name" placeholder="Enter your name">
             </div>
 
             <div class="form-group">
-                <label for="roomId">Código da Sala:</label>
-                <input type="text" id="roomId" placeholder="Digite o código da sala">
+                <label for="roomId">Room Code:</label>
+                <input type="text" id="roomId" placeholder="Enter room code">
             </div>
 
-            <button id="joinBtn">Entrar na Sala</button>
+            <button id="joinBtn">Join Room</button>
         </div>
 
         <div id="roomControls" style="display: none;">
-            <button id="leaveBtn">Sair da Sala</button>
+            <button id="leaveBtn">Leave Room</button>
         </div>
 
         <div id="status"></div>
-
-        <div id="participants"></div>
         <div id="audioContainer"></div>
     </div>
 
@@ -134,7 +123,6 @@
         const statusDiv = document.getElementById('status');
         const audioContainer = document.getElementById('audioContainer');
 
-        // Configuração do WebRTC
         const config = {
             iceServers: [
                 { urls: 'stun:stun.l.google.com:19302' }
@@ -151,44 +139,50 @@
             const roomId = roomIdInput.value.trim();
 
             if (!name || !roomId) {
-                alert('Por favor, preencha seu nome e o código da sala');
+                alert('Please fill in your name and room code');
                 return;
             }
 
             try {
-                updateStatus('Conectando ao servidor...', 'info');
+                updateStatus('Connecting to server...', 'info');
 
-                // Conectar ao WebSocket
                 const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
                 ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
 
                 ws.onopen = async () => {
-                    updateStatus('Obtendo acesso ao microfone...', 'info');
+                    updateStatus('Getting microphone access...', 'info');
 
-                    // Obter stream de áudio local
                     localStream = await navigator.mediaDevices.getUserMedia({
                         audio: true,
                         video: false
                     });
 
-                    // Criar PeerConnection
                     peerConnection = new RTCPeerConnection(config);
 
-                    // Adicionar tracks locais
                     localStream.getTracks().forEach(track => {
                         peerConnection.addTrack(track, localStream);
                     });
 
-                    // Handler para tracks remotos
                     peerConnection.ontrack = (event) => {
-                        console.log('Recebido track remoto');
+                        const track = event.track;
+                        const stream = event.streams[0];
+                        console.log('Track received:', track.id, 'kind:', track.kind);
+
                         const audio = document.createElement('audio');
-                        audio.srcObject = event.streams[0];
+                        audio.srcObject = stream;
                         audio.autoplay = true;
+                        audio.id = 'audio-' + track.id;
+
+                        audio.onplaying = () => {
+                            console.log('Audio playing:', track.id);
+                        };
+                        audio.onerror = (e) => {
+                            console.error('Audio error:', track.id, e);
+                        };
+
                         audioContainer.appendChild(audio);
                     };
 
-                    // Handler para ICE candidates
                     peerConnection.onicecandidate = (event) => {
                         if (event.candidate) {
                             ws.send(JSON.stringify({
@@ -198,11 +192,9 @@
                         }
                     };
 
-                    // Criar e enviar oferta
                     const offer = await peerConnection.createOffer();
                     await peerConnection.setLocalDescription(offer);
 
-                    // Enviar mensagem de entrada na sala
                     ws.send(JSON.stringify({
                         type: 'join',
                         data: JSON.stringify({ name, roomId })
@@ -212,17 +204,16 @@
                 ws.onmessage = async (event) => {
                     try {
                         const message = JSON.parse(event.data);
-                        console.log('Mensagem recebida:', message.type);
+                        console.log('Message received:', message.type);
 
                         switch (message.type) {
                             case 'joined':
-                                updateStatus(`Conectado à sala ${roomId}`, 'connected');
+                                updateStatus(`Connected to room ${roomId}`, 'connected');
                                 joinForm.style.display = 'none';
                                 roomControls.style.display = 'block';
 
-                                // Enviar oferta após confirmar entrada
+                                console.log('Sending initial offer');
                                 const offer = peerConnection.localDescription;
-                                console.log('Enviando offer inicial');
                                 ws.send(JSON.stringify({
                                     type: 'offer',
                                     data: JSON.stringify(offer)
@@ -230,41 +221,39 @@
                                 break;
 
                             case 'answer':
-                                console.log('Processando answer...');
+                                console.log('Processing answer...');
                                 const answer = JSON.parse(message.data);
                                 await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
-                                console.log('Answer processada com sucesso');
+                                console.log('Answer processed successfully');
                                 break;
 
                             case 'offer':
-                                console.log('========== Recebida OFFER de renegociação ==========');
-                                console.log('Estado atual da conexão:', peerConnection.connectionState);
-                                console.log('Estado de sinalização:', peerConnection.signalingState);
+                                console.log('Received renegotiation offer');
+                                console.log('Connection state:', peerConnection.connectionState);
+                                console.log('Signaling state:', peerConnection.signalingState);
 
                                 const remoteOffer = JSON.parse(message.data);
 
-                                // Verificar se há uma oferta pendente (glare condition)
                                 if (peerConnection.signalingState !== 'stable') {
-                                    console.log('ATENÇÃO: Estado não estável, aguardando estabilização...');
-                                    // Rolar para trás para stable se necessário
+                                    console.log('Connection not stable, performing rollback...');
                                     await peerConnection.setLocalDescription({type: 'rollback'});
                                 }
 
-                                console.log('Definindo remote description...');
+                                console.log('Setting remote description...');
                                 await peerConnection.setRemoteDescription(new RTCSessionDescription(remoteOffer));
 
-                                console.log('Criando answer...');
+                                console.log('Creating answer...');
                                 const answerDesc = await peerConnection.createAnswer();
 
-                                console.log('Definindo local description...');
+                                console.log('Setting local description...');
                                 await peerConnection.setLocalDescription(answerDesc);
 
-                                console.log('Enviando answer de renegociação...');
+                                console.log('Sending renegotiation answer...');
                                 ws.send(JSON.stringify({
                                     type: 'answer',
                                     data: JSON.stringify(answerDesc)
                                 }));
-                                console.log('========== Answer enviada com sucesso ==========');
+                                console.log('Answer sent successfully');
                                 break;
 
                             case 'candidate':
@@ -273,32 +262,32 @@
                                 break;
 
                             case 'peer-joined':
-                                console.log('Novo peer entrou:', message.data);
-                                updateStatus(`${message.data} entrou na sala`, 'connected');
+                                console.log('Peer joined:', message.data);
+                                updateStatus(`${message.data} joined the room`, 'connected');
                                 break;
 
                             default:
-                                console.warn('Tipo de mensagem desconhecido:', message.type);
+                                console.warn('Unknown message type:', message.type);
                         }
                     } catch (error) {
-                        console.error('ERRO ao processar mensagem:', error);
+                        console.error('ERROR processing message:', error);
                         console.error('Stack trace:', error.stack);
                     }
                 };
 
                 ws.onerror = (error) => {
-                    console.error('Erro no WebSocket:', error);
-                    updateStatus('Erro na conexão', 'error');
+                    console.error('WebSocket error:', error);
+                    updateStatus('Connection error', 'error');
                 };
 
                 ws.onclose = () => {
-                    updateStatus('Desconectado', 'error');
+                    updateStatus('Disconnected', 'error');
                     cleanup();
                 };
 
             } catch (error) {
-                console.error('Erro ao entrar na sala:', error);
-                updateStatus('Erro ao entrar na sala: ' + error.message, 'error');
+                console.error('Error joining room:', error);
+                updateStatus('Error joining room: ' + error.message, 'error');
             }
         }
 
@@ -331,7 +320,6 @@
         joinBtn.addEventListener('click', joinRoom);
         leaveBtn.addEventListener('click', leaveRoom);
 
-        // Cleanup ao fechar a página
         window.addEventListener('beforeunload', cleanup);
     </script>
 </body>

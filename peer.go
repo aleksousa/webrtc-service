@@ -5,11 +5,11 @@ import (
 	"log"
 	"sync"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v4"
 )
 
-// Peer representa um participante da sala
 type Peer struct {
 	ID                  string
 	Name                string
@@ -17,20 +17,16 @@ type Peer struct {
 	PeerConnection      *webrtc.PeerConnection
 	WebSocketConn       *websocket.Conn
 	tracksMu            sync.RWMutex
-	broadcasters        []*TrackBroadcaster // Broadcasters dos tracks que este peer está enviando
-	isNegotiating       bool                // Flag para evitar renegociações concorrentes
+	broadcasters        []*TrackBroadcaster
+	isNegotiating       bool
 	negotiatingMu       sync.Mutex
-	pendingTracks       []*TrackBroadcaster       // Tracks aguardando para serem adicionados
-	pendingCandidates   []webrtc.ICECandidateInit // ICE candidates aguardando remote description
+	pendingCandidates   []webrtc.ICECandidateInit
 	pendingCandidatesMu sync.Mutex
 }
 
-// NewPeer cria um novo peer
 func NewPeer(id, name string, room *Room, ws *websocket.Conn) (*Peer, error) {
-	// Criar MediaEngine customizado para melhor qualidade de áudio
 	mediaEngine := &webrtc.MediaEngine{}
 
-	// Configurar codec Opus para áudio de alta qualidade
 	if err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
 		RTPCodecCapability: webrtc.RTPCodecCapability{
 			MimeType:    webrtc.MimeTypeOpus,
@@ -43,21 +39,14 @@ func NewPeer(id, name string, room *Room, ws *websocket.Conn) (*Peer, error) {
 		return nil, err
 	}
 
-	// Criar SettingEngine
-	settingEngine := webrtc.SettingEngine{}
-
-	// Criar API com configurações customizadas
 	api := webrtc.NewAPI(
 		webrtc.WithMediaEngine(mediaEngine),
-		webrtc.WithSettingEngine(settingEngine),
+		webrtc.WithSettingEngine(webrtc.SettingEngine{}),
 	)
 
-	// Configuração do WebRTC
 	config := webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
-			{
-				URLs: []string{"stun:stun.l.google.com:19302"},
-			},
+			{URLs: []string{"stun:stun.l.google.com:19302"}},
 		},
 	}
 
@@ -74,33 +63,21 @@ func NewPeer(id, name string, room *Room, ws *websocket.Conn) (*Peer, error) {
 		WebSocketConn:     ws,
 		broadcasters:      make([]*TrackBroadcaster, 0),
 		isNegotiating:     false,
-		pendingTracks:     make([]*TrackBroadcaster, 0),
 		pendingCandidates: make([]webrtc.ICECandidateInit, 0),
 	}
 
-	// Handler para quando recebemos um track (áudio) do peer
 	peerConnection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
-		log.Printf("========== OnTrack chamado para %s ==========", peer.Name)
-		log.Printf("Tipo de track: %s", track.Kind())
+		log.Printf("Track received from %s (type: %s)", peer.Name, track.Kind())
 
-		// Criar um broadcaster para este track (lê UMA vez e distribui para todos)
 		broadcaster := NewTrackBroadcaster(track)
 
-		// Armazenar o broadcaster
 		peer.tracksMu.Lock()
 		peer.broadcasters = append(peer.broadcasters, broadcaster)
-		numBroadcasters := len(peer.broadcasters)
 		peer.tracksMu.Unlock()
 
-		log.Printf("Peer %s agora tem %d broadcaster(s)", peer.Name, numBroadcasters)
-
-		// Broadcast do broadcaster para todos os outros peers na sala
-		log.Printf("Iniciando broadcast do track de %s para outros peers", peer.Name)
 		room.BroadcastTrack(peer.ID, broadcaster)
-		log.Printf("================================================")
 	})
 
-	// Handler para ICE candidates
 	peerConnection.OnICECandidate(func(candidate *webrtc.ICECandidate) {
 		if candidate == nil {
 			return
@@ -108,21 +85,18 @@ func NewPeer(id, name string, room *Room, ws *websocket.Conn) (*Peer, error) {
 
 		candidateJSON, err := json.Marshal(candidate.ToJSON())
 		if err != nil {
-			log.Printf("Erro ao serializar ICE candidate: %v", err)
+			log.Printf("Error marshaling ICE candidate: %v", err)
 			return
 		}
 
-		msg := Message{
+		peer.SendMessage(Message{
 			Type: "candidate",
 			Data: string(candidateJSON),
-		}
-
-		peer.SendMessage(msg)
+		})
 	})
 
-	// Handler para mudanças no estado da conexão
 	peerConnection.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-		log.Printf("Estado da conexão de %s mudou para: %s", peer.Name, state.String())
+		log.Printf("Peer %s connection state: %s", peer.Name, state.String())
 
 		if state == webrtc.PeerConnectionStateFailed ||
 			state == webrtc.PeerConnectionStateDisconnected ||
@@ -134,71 +108,46 @@ func NewPeer(id, name string, room *Room, ws *websocket.Conn) (*Peer, error) {
 	return peer, nil
 }
 
-// AddBroadcaster adiciona um broadcaster ao peer (encaminha áudio de outro participante)
 func (p *Peer) AddBroadcaster(broadcaster *TrackBroadcaster) {
-	log.Printf(">>> AddBroadcaster chamado para peer %s <<<", p.Name)
+	uniqueTrackID := uuid.New().String()
+	uniqueStreamID := uuid.New().String()
 
-	// Gerar IDs únicos para cada track (crítico para evitar MSIDs duplicados)
-	trackID := broadcaster.remoteTrack.ID()
-	streamID := broadcaster.remoteTrack.StreamID()
-
-	log.Printf("Criando track local com ID: %s, StreamID: %s", trackID, streamID)
-
-	// Criar um track local para enviar ao peer com IDs únicos
 	localTrack, err := webrtc.NewTrackLocalStaticRTP(
 		broadcaster.remoteTrack.Codec().RTPCodecCapability,
-		trackID,  // ID único do track remoto
-		streamID, // Stream ID único do track remoto
+		uniqueTrackID,
+		uniqueStreamID,
 	)
 	if err != nil {
-		log.Printf("Erro ao criar track local: %v", err)
+		log.Printf("Error creating local track: %v", err)
 		return
 	}
 
-	// Adicionar o track à conexão do peer
 	rtpSender, err := p.PeerConnection.AddTrack(localTrack)
 	if err != nil {
-		log.Printf("Erro ao adicionar track ao peer %s: %v", p.Name, err)
+		log.Printf("Error adding track to peer %s: %v", p.Name, err)
 		return
 	}
 
-	log.Printf("Track adicionado com sucesso ao peer %s (estado: %s)", p.Name, p.PeerConnection.ConnectionState())
-
-	// Processar RTCP packets
 	go func() {
 		rtcpBuf := make([]byte, 1500)
 		for {
-			_, _, err := rtpSender.Read(rtcpBuf)
-			if err != nil {
+			if _, _, err := rtpSender.Read(rtcpBuf); err != nil {
 				return
 			}
 		}
 	}()
 
-	// Adicionar o track local ao broadcaster (broadcaster distribui os pacotes)
 	broadcaster.AddTrackLocal(localTrack)
-	log.Printf("Track local registrado no broadcaster para %s", p.Name)
 
-	// Se já temos uma conexão estabelecida, precisamos renegociar
-	state := p.PeerConnection.ConnectionState()
-	log.Printf("Estado da conexão de %s: %s", p.Name, state.String())
-
-	if state == webrtc.PeerConnectionStateConnected {
-		log.Printf(">>> Conexão já estabelecida! Iniciando renegociação para peer %s <<<", p.Name)
-		go p.Renegotiate() // Executar em goroutine para não bloquear
-	} else {
-		log.Printf(">>> Conexão de %s ainda não estabelecida (%s), renegociação não necessária <<<", p.Name, state.String())
+	if p.PeerConnection.ConnectionState() == webrtc.PeerConnectionStateConnected {
+		log.Printf("Starting renegotiation for peer %s", p.Name)
+		go p.Renegotiate()
 	}
 }
 
-// Renegotiate cria uma nova oferta para renegociar a conexão
 func (p *Peer) Renegotiate() {
-	log.Printf("***** RENEGOTIATE INICIADA PARA %s *****", p.Name)
-
-	// Evitar renegociações concorrentes
 	p.negotiatingMu.Lock()
 	if p.isNegotiating {
-		log.Printf("Renegociação já em andamento para %s, ignorando", p.Name)
 		p.negotiatingMu.Unlock()
 		return
 	}
@@ -209,38 +158,31 @@ func (p *Peer) Renegotiate() {
 		p.negotiatingMu.Lock()
 		p.isNegotiating = false
 		p.negotiatingMu.Unlock()
-		log.Printf("***** RENEGOTIATE FINALIZADA PARA %s *****", p.Name)
 	}()
-
-	log.Printf("Criando offer de renegociação para %s", p.Name)
 
 	offer, err := p.PeerConnection.CreateOffer(nil)
 	if err != nil {
-		log.Printf("Erro ao criar oferta para renegociação de %s: %v", p.Name, err)
+		log.Printf("Error creating renegotiation offer for %s: %v", p.Name, err)
 		return
 	}
 
 	if err := p.PeerConnection.SetLocalDescription(offer); err != nil {
-		log.Printf("Erro ao definir descrição local para %s: %v", p.Name, err)
+		log.Printf("Error setting local description for %s: %v", p.Name, err)
 		return
 	}
 
 	offerJSON, err := json.Marshal(offer)
 	if err != nil {
-		log.Printf("Erro ao serializar oferta para %s: %v", p.Name, err)
+		log.Printf("Error marshaling offer for %s: %v", p.Name, err)
 		return
 	}
 
-	msg := Message{
+	p.SendMessage(Message{
 		Type: "offer",
 		Data: string(offerJSON),
-	}
-
-	log.Printf("Enviando offer de renegociação para %s", p.Name)
-	p.SendMessage(msg)
+	})
 }
 
-// GetBroadcasters retorna os broadcasters que este peer está enviando
 func (p *Peer) GetBroadcasters() []*TrackBroadcaster {
 	p.tracksMu.RLock()
 	defer p.tracksMu.RUnlock()
@@ -250,23 +192,17 @@ func (p *Peer) GetBroadcasters() []*TrackBroadcaster {
 	return broadcasters
 }
 
-// AddICECandidate adiciona um ICE candidate, com buffer se remote description não estiver definida
 func (p *Peer) AddICECandidate(candidate webrtc.ICECandidateInit) error {
-	// Verificar se a remote description já foi definida
 	if p.PeerConnection.RemoteDescription() == nil {
-		// Fazer buffer do candidate
 		p.pendingCandidatesMu.Lock()
 		p.pendingCandidates = append(p.pendingCandidates, candidate)
 		p.pendingCandidatesMu.Unlock()
-		log.Printf("ICE candidate de %s adicionado ao buffer (aguardando remote description)", p.Name)
 		return nil
 	}
 
-	// Remote description está definida, adicionar candidate normalmente
 	return p.PeerConnection.AddICECandidate(candidate)
 }
 
-// ProcessPendingCandidates processa todos os ICE candidates que estavam em buffer
 func (p *Peer) ProcessPendingCandidates() {
 	p.pendingCandidatesMu.Lock()
 	defer p.pendingCandidatesMu.Unlock()
@@ -275,34 +211,30 @@ func (p *Peer) ProcessPendingCandidates() {
 		return
 	}
 
-	log.Printf("Processando %d ICE candidates pendentes para %s", len(p.pendingCandidates), p.Name)
+	log.Printf("Processing %d pending ICE candidates for %s", len(p.pendingCandidates), p.Name)
 
 	for _, candidate := range p.pendingCandidates {
 		if err := p.PeerConnection.AddICECandidate(candidate); err != nil {
-			log.Printf("Erro ao adicionar ICE candidate pendente para %s: %v", p.Name, err)
+			log.Printf("Error adding pending ICE candidate for %s: %v", p.Name, err)
 		}
 	}
 
-	// Limpar o buffer
 	p.pendingCandidates = make([]webrtc.ICECandidateInit, 0)
 }
 
-// SendMessage envia uma mensagem pelo WebSocket
 func (p *Peer) SendMessage(msg Message) {
 	if p.WebSocketConn == nil {
 		return
 	}
 
 	if err := p.WebSocketConn.WriteJSON(msg); err != nil {
-		log.Printf("Erro ao enviar mensagem para %s: %v", p.Name, err)
+		log.Printf("Error sending message to %s: %v", p.Name, err)
 	}
 }
 
-// Close fecha a conexão do peer
 func (p *Peer) Close() {
-	log.Printf("Fechando conexão do peer %s", p.Name)
+	log.Printf("Closing peer %s", p.Name)
 
-	// Fechar todos os broadcasters
 	p.tracksMu.Lock()
 	for _, broadcaster := range p.broadcasters {
 		broadcaster.Close()
