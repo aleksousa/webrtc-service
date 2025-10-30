@@ -138,11 +138,17 @@ func NewPeer(id, name string, room *Room, ws *websocket.Conn) (*Peer, error) {
 func (p *Peer) AddBroadcaster(broadcaster *TrackBroadcaster) {
 	log.Printf(">>> AddBroadcaster chamado para peer %s <<<", p.Name)
 
-	// Criar um track local para enviar ao peer
+	// Gerar IDs únicos para cada track (crítico para evitar MSIDs duplicados)
+	trackID := broadcaster.remoteTrack.ID()
+	streamID := broadcaster.remoteTrack.StreamID()
+
+	log.Printf("Criando track local com ID: %s, StreamID: %s", trackID, streamID)
+
+	// Criar um track local para enviar ao peer com IDs únicos
 	localTrack, err := webrtc.NewTrackLocalStaticRTP(
 		broadcaster.remoteTrack.Codec().RTPCodecCapability,
-		"audio",
-		"webrtc-sfu",
+		trackID,  // ID único do track remoto
+		streamID, // Stream ID único do track remoto
 	)
 	if err != nil {
 		log.Printf("Erro ao criar track local: %v", err)
