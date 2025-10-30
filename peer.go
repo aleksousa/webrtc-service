@@ -18,6 +18,9 @@ type Peer struct {
 	WebSocketConn  *websocket.Conn
 	tracksMu       sync.RWMutex
 	broadcasters   []*TrackBroadcaster // Broadcasters dos tracks que este peer está enviando
+	isNegotiating  bool                // Flag para evitar renegociações concorrentes
+	negotiatingMu  sync.Mutex
+	pendingTracks  []*TrackBroadcaster // Tracks aguardando para serem adicionados
 }
 
 // NewPeer cria um novo peer
@@ -68,6 +71,8 @@ func NewPeer(id, name string, room *Room, ws *websocket.Conn) (*Peer, error) {
 		PeerConnection: peerConnection,
 		WebSocketConn:  ws,
 		broadcasters:   make([]*TrackBroadcaster, 0),
+		isNegotiating:  false,
+		pendingTracks:  make([]*TrackBroadcaster, 0),
 	}
 
 	// Handler para quando recebemos um track (áudio) do peer
@@ -136,9 +141,11 @@ func (p *Peer) AddBroadcaster(broadcaster *TrackBroadcaster) {
 	// Adicionar o track à conexão do peer
 	rtpSender, err := p.PeerConnection.AddTrack(localTrack)
 	if err != nil {
-		log.Printf("Erro ao adicionar track ao peer: %v", err)
+		log.Printf("Erro ao adicionar track ao peer %s: %v", p.Name, err)
 		return
 	}
+
+	log.Printf("Track adicionado ao peer %s (estado: %s)", p.Name, p.PeerConnection.ConnectionState())
 
 	// Processar RTCP packets
 	go func() {
@@ -155,27 +162,47 @@ func (p *Peer) AddBroadcaster(broadcaster *TrackBroadcaster) {
 	broadcaster.AddTrackLocal(localTrack)
 
 	// Se já temos uma conexão estabelecida, precisamos renegociar
-	if p.PeerConnection.ConnectionState() == webrtc.PeerConnectionStateConnected {
-		p.Renegotiate()
+	state := p.PeerConnection.ConnectionState()
+	if state == webrtc.PeerConnectionStateConnected {
+		log.Printf("Iniciando renegociação para peer %s", p.Name)
+		go p.Renegotiate() // Executar em goroutine para não bloquear
 	}
 }
 
 // Renegotiate cria uma nova oferta para renegociar a conexão
 func (p *Peer) Renegotiate() {
+	// Evitar renegociações concorrentes
+	p.negotiatingMu.Lock()
+	if p.isNegotiating {
+		log.Printf("Renegociação já em andamento para %s, ignorando", p.Name)
+		p.negotiatingMu.Unlock()
+		return
+	}
+	p.isNegotiating = true
+	p.negotiatingMu.Unlock()
+
+	defer func() {
+		p.negotiatingMu.Lock()
+		p.isNegotiating = false
+		p.negotiatingMu.Unlock()
+	}()
+
+	log.Printf("Criando offer de renegociação para %s", p.Name)
+
 	offer, err := p.PeerConnection.CreateOffer(nil)
 	if err != nil {
-		log.Printf("Erro ao criar oferta para renegociação: %v", err)
+		log.Printf("Erro ao criar oferta para renegociação de %s: %v", p.Name, err)
 		return
 	}
 
 	if err := p.PeerConnection.SetLocalDescription(offer); err != nil {
-		log.Printf("Erro ao definir descrição local: %v", err)
+		log.Printf("Erro ao definir descrição local para %s: %v", p.Name, err)
 		return
 	}
 
 	offerJSON, err := json.Marshal(offer)
 	if err != nil {
-		log.Printf("Erro ao serializar oferta: %v", err)
+		log.Printf("Erro ao serializar oferta para %s: %v", p.Name, err)
 		return
 	}
 
@@ -184,6 +211,7 @@ func (p *Peer) Renegotiate() {
 		Data: string(offerJSON),
 	}
 
+	log.Printf("Enviando offer de renegociação para %s", p.Name)
 	p.SendMessage(msg)
 }
 
