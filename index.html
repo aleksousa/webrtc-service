@@ -210,46 +210,79 @@
                 };
 
                 ws.onmessage = async (event) => {
-                    const message = JSON.parse(event.data);
+                    try {
+                        const message = JSON.parse(event.data);
+                        console.log('Mensagem recebida:', message.type);
 
-                    switch (message.type) {
-                        case 'joined':
-                            updateStatus(`Conectado à sala ${roomId}`, 'connected');
-                            joinForm.style.display = 'none';
-                            roomControls.style.display = 'block';
+                        switch (message.type) {
+                            case 'joined':
+                                updateStatus(`Conectado à sala ${roomId}`, 'connected');
+                                joinForm.style.display = 'none';
+                                roomControls.style.display = 'block';
 
-                            // Enviar oferta após confirmar entrada
-                            const offer = peerConnection.localDescription;
-                            ws.send(JSON.stringify({
-                                type: 'offer',
-                                data: JSON.stringify(offer)
-                            }));
-                            break;
+                                // Enviar oferta após confirmar entrada
+                                const offer = peerConnection.localDescription;
+                                console.log('Enviando offer inicial');
+                                ws.send(JSON.stringify({
+                                    type: 'offer',
+                                    data: JSON.stringify(offer)
+                                }));
+                                break;
 
-                        case 'answer':
-                            const answer = JSON.parse(message.data);
-                            await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
-                            break;
+                            case 'answer':
+                                console.log('Processando answer...');
+                                const answer = JSON.parse(message.data);
+                                await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+                                console.log('Answer processada com sucesso');
+                                break;
 
-                        case 'offer':
-                            const remoteOffer = JSON.parse(message.data);
-                            await peerConnection.setRemoteDescription(new RTCSessionDescription(remoteOffer));
-                            const answerDesc = await peerConnection.createAnswer();
-                            await peerConnection.setLocalDescription(answerDesc);
-                            ws.send(JSON.stringify({
-                                type: 'answer',
-                                data: JSON.stringify(answerDesc)
-                            }));
-                            break;
+                            case 'offer':
+                                console.log('========== Recebida OFFER de renegociação ==========');
+                                console.log('Estado atual da conexão:', peerConnection.connectionState);
+                                console.log('Estado de sinalização:', peerConnection.signalingState);
 
-                        case 'candidate':
-                            const candidate = JSON.parse(message.data);
-                            await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
-                            break;
+                                const remoteOffer = JSON.parse(message.data);
 
-                        case 'peer-joined':
-                            updateStatus(`${message.data} entrou na sala`, 'connected');
-                            break;
+                                // Verificar se há uma oferta pendente (glare condition)
+                                if (peerConnection.signalingState !== 'stable') {
+                                    console.log('ATENÇÃO: Estado não estável, aguardando estabilização...');
+                                    // Rolar para trás para stable se necessário
+                                    await peerConnection.setLocalDescription({type: 'rollback'});
+                                }
+
+                                console.log('Definindo remote description...');
+                                await peerConnection.setRemoteDescription(new RTCSessionDescription(remoteOffer));
+
+                                console.log('Criando answer...');
+                                const answerDesc = await peerConnection.createAnswer();
+
+                                console.log('Definindo local description...');
+                                await peerConnection.setLocalDescription(answerDesc);
+
+                                console.log('Enviando answer de renegociação...');
+                                ws.send(JSON.stringify({
+                                    type: 'answer',
+                                    data: JSON.stringify(answerDesc)
+                                }));
+                                console.log('========== Answer enviada com sucesso ==========');
+                                break;
+
+                            case 'candidate':
+                                const candidate = JSON.parse(message.data);
+                                await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+                                break;
+
+                            case 'peer-joined':
+                                console.log('Novo peer entrou:', message.data);
+                                updateStatus(`${message.data} entrou na sala`, 'connected');
+                                break;
+
+                            default:
+                                console.warn('Tipo de mensagem desconhecido:', message.type);
+                        }
+                    } catch (error) {
+                        console.error('ERRO ao processar mensagem:', error);
+                        console.error('Stack trace:', error.stack);
                     }
                 };
 
