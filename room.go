@@ -2,8 +2,6 @@ package main
 
 import (
 	"sync"
-
-	"github.com/pion/webrtc/v4"
 )
 
 // Room representa uma sala de conferência
@@ -71,14 +69,14 @@ func (r *Room) GetPeers(excludeID string) []*Peer {
 	return peers
 }
 
-// BroadcastTrack envia um track para todos os peers da sala (exceto o remetente)
-func (r *Room) BroadcastTrack(senderID string, track *webrtc.TrackRemote) {
+// BroadcastTrack envia um broadcaster para todos os peers da sala (exceto o remetente)
+func (r *Room) BroadcastTrack(senderID string, broadcaster *TrackBroadcaster) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	for id, peer := range r.peers {
 		if id != senderID {
-			peer.AddTrack(track)
+			peer.AddBroadcaster(broadcaster)
 		}
 	}
 }

@@ -17,7 +17,7 @@ type Peer struct {
 	PeerConnection *webrtc.PeerConnection
 	WebSocketConn  *websocket.Conn
 	tracksMu       sync.RWMutex
-	remoteTracks   []*webrtc.TrackRemote // Tracks que este peer está enviando
+	broadcasters   []*TrackBroadcaster // Broadcasters dos tracks que este peer está enviando
 }
 
 // NewPeer cria um novo peer
@@ -67,32 +67,23 @@ func NewPeer(id, name string, room *Room, ws *websocket.Conn) (*Peer, error) {
 		Room:           room,
 		PeerConnection: peerConnection,
 		WebSocketConn:  ws,
-		remoteTracks:   make([]*webrtc.TrackRemote, 0),
+		broadcasters:   make([]*TrackBroadcaster, 0),
 	}
 
 	// Handler para quando recebemos um track (áudio) do peer
 	peerConnection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 		log.Printf("Recebido track de %s (tipo: %s)", peer.Name, track.Kind())
 
-		// Armazenar o track remoto
+		// Criar um broadcaster para este track (lê UMA vez e distribui para todos)
+		broadcaster := NewTrackBroadcaster(track)
+
+		// Armazenar o broadcaster
 		peer.tracksMu.Lock()
-		peer.remoteTracks = append(peer.remoteTracks, track)
+		peer.broadcasters = append(peer.broadcasters, broadcaster)
 		peer.tracksMu.Unlock()
 
-		// Broadcast do track para todos os outros peers na sala
-		room.BroadcastTrack(peer.ID, track)
-
-		// Ler e processar os pacotes RTP
-		go func() {
-			buf := make([]byte, 1500)
-			for {
-				_, _, err := track.Read(buf)
-				if err != nil {
-					log.Printf("Erro ao ler track: %v", err)
-					return
-				}
-			}
-		}()
+		// Broadcast do broadcaster para todos os outros peers na sala
+		room.BroadcastTrack(peer.ID, broadcaster)
 	})
 
 	// Handler para ICE candidates
@@ -129,11 +120,11 @@ func NewPeer(id, name string, room *Room, ws *websocket.Conn) (*Peer, error) {
 	return peer, nil
 }
 
-// AddTrack adiciona um track remoto ao peer (encaminha áudio de outro participante)
-func (p *Peer) AddTrack(remoteTrack *webrtc.TrackRemote) {
+// AddBroadcaster adiciona um broadcaster ao peer (encaminha áudio de outro participante)
+func (p *Peer) AddBroadcaster(broadcaster *TrackBroadcaster) {
 	// Criar um track local para enviar ao peer
 	localTrack, err := webrtc.NewTrackLocalStaticRTP(
-		remoteTrack.Codec().RTPCodecCapability,
+		broadcaster.remoteTrack.Codec().RTPCodecCapability,
 		"audio",
 		"webrtc-sfu",
 	)
@@ -160,20 +151,8 @@ func (p *Peer) AddTrack(remoteTrack *webrtc.TrackRemote) {
 		}
 	}()
 
-	// Encaminhar pacotes RTP do track remoto para o track local
-	go func() {
-		buf := make([]byte, 1500)
-		for {
-			n, _, err := remoteTrack.Read(buf)
-			if err != nil {
-				return
-			}
-
-			if _, err := localTrack.Write(buf[:n]); err != nil {
-				return
-			}
-		}
-	}()
+	// Adicionar o track local ao broadcaster (broadcaster distribui os pacotes)
+	broadcaster.AddTrackLocal(localTrack)
 
 	// Se já temos uma conexão estabelecida, precisamos renegociar
 	if p.PeerConnection.ConnectionState() == webrtc.PeerConnectionStateConnected {
@@ -208,14 +187,14 @@ func (p *Peer) Renegotiate() {
 	p.SendMessage(msg)
 }
 
-// GetRemoteTracks retorna os tracks remotos que este peer está enviando
-func (p *Peer) GetRemoteTracks() []*webrtc.TrackRemote {
+// GetBroadcasters retorna os broadcasters que este peer está enviando
+func (p *Peer) GetBroadcasters() []*TrackBroadcaster {
 	p.tracksMu.RLock()
 	defer p.tracksMu.RUnlock()
 
-	tracks := make([]*webrtc.TrackRemote, len(p.remoteTracks))
-	copy(tracks, p.remoteTracks)
-	return tracks
+	broadcasters := make([]*TrackBroadcaster, len(p.broadcasters))
+	copy(broadcasters, p.broadcasters)
+	return broadcasters
 }
 
 // SendMessage envia uma mensagem pelo WebSocket
@@ -232,6 +211,14 @@ func (p *Peer) SendMessage(msg Message) {
 // Close fecha a conexão do peer
 func (p *Peer) Close() {
 	log.Printf("Fechando conexão do peer %s", p.Name)
+
+	// Fechar todos os broadcasters
+	p.tracksMu.Lock()
+	for _, broadcaster := range p.broadcasters {
+		broadcaster.Close()
+	}
+	p.broadcasters = nil
+	p.tracksMu.Unlock()
 
 	if p.PeerConnection != nil {
 		p.PeerConnection.Close()

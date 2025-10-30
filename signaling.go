@@ -87,12 +87,12 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request, roomManager *RoomMa
 			// Obter todos os outros peers na sala
 			otherPeers := room.GetPeers(peer.ID)
 
-			// Enviar todos os tracks existentes dos outros peers para o novo peer
+			// Enviar todos os broadcasters existentes dos outros peers para o novo peer
 			for _, otherPeer := range otherPeers {
-				tracks := otherPeer.GetRemoteTracks()
-				for _, track := range tracks {
+				broadcasters := otherPeer.GetBroadcasters()
+				for _, broadcaster := range broadcasters {
 					log.Printf("Enviando track de %s para novo peer %s", otherPeer.Name, peer.Name)
-					peer.AddTrack(track)
+					peer.AddBroadcaster(broadcaster)
 				}
 			}
 
