@@ -10,13 +10,11 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-// Message representa uma mensagem de sinalização
 type Message struct {
 	Type string `json:"type"`
 	Data string `json:"data"`
 }
 
-// JoinRequest representa uma solicitação para entrar em uma sala
 type JoinRequest struct {
 	Name   string `json:"name"`
 	RoomID string `json:"roomId"`
@@ -24,15 +22,14 @@ type JoinRequest struct {
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
-		return true // Em produção, validar a origem adequadamente
+		return true
 	},
 }
 
-// HandleWebSocket gerencia as conexões WebSocket
 func HandleWebSocket(w http.ResponseWriter, r *http.Request, roomManager *RoomManager) {
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("Erro ao fazer upgrade para WebSocket: %v", err)
+		log.Printf("WebSocket upgrade error: %v", err)
 		return
 	}
 	defer ws.Close()
@@ -40,12 +37,11 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request, roomManager *RoomMa
 	var peer *Peer
 	var room *Room
 
-	// Loop para processar mensagens
 	for {
 		var msg Message
 		err := ws.ReadJSON(&msg)
 		if err != nil {
-			log.Printf("Erro ao ler mensagem: %v", err)
+			log.Printf("Error reading message: %v", err)
 			if peer != nil {
 				peer.Close()
 			}
@@ -54,165 +50,134 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request, roomManager *RoomMa
 
 		switch msg.Type {
 		case "join":
-			// Processar solicitação de entrada na sala
 			var joinReq JoinRequest
 			if err := json.Unmarshal([]byte(msg.Data), &joinReq); err != nil {
-				log.Printf("Erro ao decodificar join request: %v", err)
+				log.Printf("Error decoding join request: %v", err)
 				continue
 			}
 
-			// Obter ou criar a sala
 			room = roomManager.GetOrCreateRoom(joinReq.RoomID)
 
-			// Criar o peer
 			peerID := uuid.New().String()
 			peer, err = NewPeer(peerID, joinReq.Name, room, ws)
 			if err != nil {
-				log.Printf("Erro ao criar peer: %v", err)
+				log.Printf("Error creating peer: %v", err)
 				continue
 			}
 
-			// Adicionar peer à sala
 			room.AddPeer(peer)
 
-			log.Printf("Peer %s (%s) entrou na sala %s", peer.Name, peer.ID, room.ID)
+			log.Printf("Peer %s (%s) joined room %s", peer.Name, peer.ID, room.ID)
 
-			// Enviar confirmação de entrada
-			response := Message{
+			peer.SendMessage(Message{
 				Type: "joined",
 				Data: peerID,
-			}
-			peer.SendMessage(response)
-
-			log.Printf("Peer %s aguardando offer para adicionar tracks existentes", peer.Name)
+			})
 
 		case "offer":
-			// Processar oferta SDP
 			if peer == nil {
-				log.Println("Peer não inicializado")
+				log.Println("Peer not initialized")
 				continue
 			}
 
-			log.Printf("Recebida offer de %s", peer.Name)
+			log.Printf("Received offer from %s", peer.Name)
 
 			var offer webrtc.SessionDescription
 			if err := json.Unmarshal([]byte(msg.Data), &offer); err != nil {
-				log.Printf("Erro ao decodificar oferta: %v", err)
+				log.Printf("Error decoding offer: %v", err)
 				continue
 			}
 
-			// Definir a descrição remota
 			if err := peer.PeerConnection.SetRemoteDescription(offer); err != nil {
-				log.Printf("Erro ao definir descrição remota: %v", err)
+				log.Printf("Error setting remote description: %v", err)
 				continue
 			}
 
-			// Processar ICE candidates que chegaram antes da remote description
 			peer.ProcessPendingCandidates()
 
-			// IMPORTANTE: Adicionar tracks existentes de outros peers ANTES de criar answer
-			// Isso garante que a answer inclui todos os tracks
 			otherPeers := room.GetPeers(peer.ID)
-			log.Printf("========== Adicionando tracks existentes para %s ==========", peer.Name)
-			log.Printf("Número de outros peers na sala: %d", len(otherPeers))
+			log.Printf("Adding existing tracks to %s from %d peers", peer.Name, len(otherPeers))
 
-			totalTracks := 0
 			for _, otherPeer := range otherPeers {
 				broadcasters := otherPeer.GetBroadcasters()
-				log.Printf("Peer %s tem %d broadcasters", otherPeer.Name, len(broadcasters))
-				for i, broadcaster := range broadcasters {
-					log.Printf("Adicionando track %d de %s para %s", i+1, otherPeer.Name, peer.Name)
+				for _, broadcaster := range broadcasters {
 					peer.AddBroadcaster(broadcaster)
-					totalTracks++
 				}
 			}
-			log.Printf("Total de tracks adicionados para %s: %d", peer.Name, totalTracks)
-			log.Printf("=============================================================")
 
-			// Criar resposta (agora inclui todos os tracks adicionados)
 			answer, err := peer.PeerConnection.CreateAnswer(nil)
 			if err != nil {
-				log.Printf("Erro ao criar resposta: %v", err)
+				log.Printf("Error creating answer: %v", err)
 				continue
 			}
 
-			// Definir a descrição local
 			if err := peer.PeerConnection.SetLocalDescription(answer); err != nil {
-				log.Printf("Erro ao definir descrição local: %v", err)
+				log.Printf("Error setting local description: %v", err)
 				continue
 			}
 
-			log.Printf("Answer criada para %s com tracks incluídos", peer.Name)
+			log.Printf("Answer created for %s", peer.Name)
 
-			// Enviar resposta ao cliente
 			answerJSON, err := json.Marshal(answer)
 			if err != nil {
-				log.Printf("Erro ao serializar resposta: %v", err)
+				log.Printf("Error marshaling answer: %v", err)
 				continue
 			}
 
-			response := Message{
+			peer.SendMessage(Message{
 				Type: "answer",
 				Data: string(answerJSON),
-			}
-			peer.SendMessage(response)
+			})
 
-			// Notificar os outros peers sobre o novo participante
-			notification := Message{
-				Type: "peer-joined",
-				Data: peer.Name,
-			}
 			for _, otherPeer := range otherPeers {
-				otherPeer.SendMessage(notification)
+				otherPeer.SendMessage(Message{
+					Type: "peer-joined",
+					Data: peer.Name,
+				})
 			}
 
 		case "answer":
-			// Processar resposta SDP
 			if peer == nil {
-				log.Println("Peer não inicializado")
+				log.Println("Peer not initialized")
 				continue
 			}
 
-			log.Printf("Recebida answer de %s", peer.Name)
+			log.Printf("Received answer from %s", peer.Name)
 
 			var answer webrtc.SessionDescription
 			if err := json.Unmarshal([]byte(msg.Data), &answer); err != nil {
-				log.Printf("Erro ao decodificar resposta de %s: %v", peer.Name, err)
+				log.Printf("Error decoding answer from %s: %v", peer.Name, err)
 				continue
 			}
 
-			// Definir a descrição remota
 			if err := peer.PeerConnection.SetRemoteDescription(answer); err != nil {
-				log.Printf("Erro ao definir descrição remota para %s: %v", peer.Name, err)
+				log.Printf("Error setting remote description for %s: %v", peer.Name, err)
 				continue
 			}
 
-			// Processar ICE candidates que chegaram antes da remote description
 			peer.ProcessPendingCandidates()
 
-			log.Printf("Answer processada com sucesso para %s (estado: %s)", peer.Name, peer.PeerConnection.ConnectionState())
+			log.Printf("Answer processed successfully for %s (state: %s)", peer.Name, peer.PeerConnection.ConnectionState())
 
 		case "candidate":
-			// Processar ICE candidate
 			if peer == nil {
-				log.Println("Peer não inicializado")
+				log.Println("Peer not initialized")
 				continue
 			}
 
 			var candidate webrtc.ICECandidateInit
 			if err := json.Unmarshal([]byte(msg.Data), &candidate); err != nil {
-				log.Printf("Erro ao decodificar candidato de %s: %v", peer.Name, err)
+				log.Printf("Error decoding candidate from %s: %v", peer.Name, err)
 				continue
 			}
 
-			// Adicionar ICE candidate (com buffer se necessário)
 			if err := peer.AddICECandidate(candidate); err != nil {
-				log.Printf("Erro ao adicionar ICE candidate para %s: %v", peer.Name, err)
+				log.Printf("Error adding ICE candidate for %s: %v", peer.Name, err)
 				continue
 			}
 
 		default:
-			log.Printf("Tipo de mensagem desconhecido: %s", msg.Type)
+			log.Printf("Unknown message type: %s", msg.Type)
 		}
 	}
 }
