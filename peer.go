@@ -17,11 +17,36 @@ type Peer struct {
 	PeerConnection *webrtc.PeerConnection
 	WebSocketConn  *websocket.Conn
 	tracksMu       sync.RWMutex
-	pendingTracks  []*webrtc.TrackRemote
+	remoteTracks   []*webrtc.TrackRemote // Tracks que este peer está enviando
 }
 
 // NewPeer cria um novo peer
 func NewPeer(id, name string, room *Room, ws *websocket.Conn) (*Peer, error) {
+	// Criar MediaEngine customizado para melhor qualidade de áudio
+	mediaEngine := &webrtc.MediaEngine{}
+
+	// Configurar codec Opus para áudio de alta qualidade
+	if err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType:    webrtc.MimeTypeOpus,
+			ClockRate:   48000,
+			Channels:    2,
+			SDPFmtpLine: "minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1",
+		},
+		PayloadType: 111,
+	}, webrtc.RTPCodecTypeAudio); err != nil {
+		return nil, err
+	}
+
+	// Criar SettingEngine
+	settingEngine := webrtc.SettingEngine{}
+
+	// Criar API com configurações customizadas
+	api := webrtc.NewAPI(
+		webrtc.WithMediaEngine(mediaEngine),
+		webrtc.WithSettingEngine(settingEngine),
+	)
+
 	// Configuração do WebRTC
 	config := webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
@@ -31,7 +56,7 @@ func NewPeer(id, name string, room *Room, ws *websocket.Conn) (*Peer, error) {
 		},
 	}
 
-	peerConnection, err := webrtc.NewPeerConnection(config)
+	peerConnection, err := api.NewPeerConnection(config)
 	if err != nil {
 		return nil, err
 	}
@@ -42,12 +67,17 @@ func NewPeer(id, name string, room *Room, ws *websocket.Conn) (*Peer, error) {
 		Room:           room,
 		PeerConnection: peerConnection,
 		WebSocketConn:  ws,
-		pendingTracks:  make([]*webrtc.TrackRemote, 0),
+		remoteTracks:   make([]*webrtc.TrackRemote, 0),
 	}
 
 	// Handler para quando recebemos um track (áudio) do peer
 	peerConnection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 		log.Printf("Recebido track de %s (tipo: %s)", peer.Name, track.Kind())
+
+		// Armazenar o track remoto
+		peer.tracksMu.Lock()
+		peer.remoteTracks = append(peer.remoteTracks, track)
+		peer.tracksMu.Unlock()
 
 		// Broadcast do track para todos os outros peers na sala
 		room.BroadcastTrack(peer.ID, track)
@@ -176,6 +206,16 @@ func (p *Peer) Renegotiate() {
 	}
 
 	p.SendMessage(msg)
+}
+
+// GetRemoteTracks retorna os tracks remotos que este peer está enviando
+func (p *Peer) GetRemoteTracks() []*webrtc.TrackRemote {
+	p.tracksMu.RLock()
+	defer p.tracksMu.RUnlock()
+
+	tracks := make([]*webrtc.TrackRemote, len(p.remoteTracks))
+	copy(tracks, p.remoteTracks)
+	return tracks
 }
 
 // SendMessage envia uma mensagem pelo WebSocket
