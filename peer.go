@@ -11,16 +11,18 @@ import (
 
 // Peer representa um participante da sala
 type Peer struct {
-	ID             string
-	Name           string
-	Room           *Room
-	PeerConnection *webrtc.PeerConnection
-	WebSocketConn  *websocket.Conn
-	tracksMu       sync.RWMutex
-	broadcasters   []*TrackBroadcaster // Broadcasters dos tracks que este peer está enviando
-	isNegotiating  bool                // Flag para evitar renegociações concorrentes
-	negotiatingMu  sync.Mutex
-	pendingTracks  []*TrackBroadcaster // Tracks aguardando para serem adicionados
+	ID                  string
+	Name                string
+	Room                *Room
+	PeerConnection      *webrtc.PeerConnection
+	WebSocketConn       *websocket.Conn
+	tracksMu            sync.RWMutex
+	broadcasters        []*TrackBroadcaster // Broadcasters dos tracks que este peer está enviando
+	isNegotiating       bool                // Flag para evitar renegociações concorrentes
+	negotiatingMu       sync.Mutex
+	pendingTracks       []*TrackBroadcaster       // Tracks aguardando para serem adicionados
+	pendingCandidates   []webrtc.ICECandidateInit // ICE candidates aguardando remote description
+	pendingCandidatesMu sync.Mutex
 }
 
 // NewPeer cria um novo peer
@@ -65,14 +67,15 @@ func NewPeer(id, name string, room *Room, ws *websocket.Conn) (*Peer, error) {
 	}
 
 	peer := &Peer{
-		ID:             id,
-		Name:           name,
-		Room:           room,
-		PeerConnection: peerConnection,
-		WebSocketConn:  ws,
-		broadcasters:   make([]*TrackBroadcaster, 0),
-		isNegotiating:  false,
-		pendingTracks:  make([]*TrackBroadcaster, 0),
+		ID:                id,
+		Name:              name,
+		Room:              room,
+		PeerConnection:    peerConnection,
+		WebSocketConn:     ws,
+		broadcasters:      make([]*TrackBroadcaster, 0),
+		isNegotiating:     false,
+		pendingTracks:     make([]*TrackBroadcaster, 0),
+		pendingCandidates: make([]webrtc.ICECandidateInit, 0),
 	}
 
 	// Handler para quando recebemos um track (áudio) do peer
@@ -223,6 +226,43 @@ func (p *Peer) GetBroadcasters() []*TrackBroadcaster {
 	broadcasters := make([]*TrackBroadcaster, len(p.broadcasters))
 	copy(broadcasters, p.broadcasters)
 	return broadcasters
+}
+
+// AddICECandidate adiciona um ICE candidate, com buffer se remote description não estiver definida
+func (p *Peer) AddICECandidate(candidate webrtc.ICECandidateInit) error {
+	// Verificar se a remote description já foi definida
+	if p.PeerConnection.RemoteDescription() == nil {
+		// Fazer buffer do candidate
+		p.pendingCandidatesMu.Lock()
+		p.pendingCandidates = append(p.pendingCandidates, candidate)
+		p.pendingCandidatesMu.Unlock()
+		log.Printf("ICE candidate de %s adicionado ao buffer (aguardando remote description)", p.Name)
+		return nil
+	}
+
+	// Remote description está definida, adicionar candidate normalmente
+	return p.PeerConnection.AddICECandidate(candidate)
+}
+
+// ProcessPendingCandidates processa todos os ICE candidates que estavam em buffer
+func (p *Peer) ProcessPendingCandidates() {
+	p.pendingCandidatesMu.Lock()
+	defer p.pendingCandidatesMu.Unlock()
+
+	if len(p.pendingCandidates) == 0 {
+		return
+	}
+
+	log.Printf("Processando %d ICE candidates pendentes para %s", len(p.pendingCandidates), p.Name)
+
+	for _, candidate := range p.pendingCandidates {
+		if err := p.PeerConnection.AddICECandidate(candidate); err != nil {
+			log.Printf("Erro ao adicionar ICE candidate pendente para %s: %v", p.Name, err)
+		}
+	}
+
+	// Limpar o buffer
+	p.pendingCandidates = make([]webrtc.ICECandidateInit, 0)
 }
 
 // SendMessage envia uma mensagem pelo WebSocket

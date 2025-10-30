@@ -107,6 +107,9 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request, roomManager *RoomMa
 				continue
 			}
 
+			// Processar ICE candidates que chegaram antes da remote description
+			peer.ProcessPendingCandidates()
+
 			// IMPORTANTE: Adicionar tracks existentes de outros peers ANTES de criar answer
 			// Isso garante que a answer inclui todos os tracks
 			otherPeers := room.GetPeers(peer.ID)
@@ -178,6 +181,9 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request, roomManager *RoomMa
 				continue
 			}
 
+			// Processar ICE candidates que chegaram antes da remote description
+			peer.ProcessPendingCandidates()
+
 			log.Printf("Answer processada com sucesso para %s (estado: %s)", peer.Name, peer.PeerConnection.ConnectionState())
 
 		case "candidate":
@@ -193,8 +199,8 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request, roomManager *RoomMa
 				continue
 			}
 
-			// Adicionar ICE candidate
-			if err := peer.PeerConnection.AddICECandidate(candidate); err != nil {
+			// Adicionar ICE candidate (com buffer se necessário)
+			if err := peer.AddICECandidate(candidate); err != nil {
 				log.Printf("Erro ao adicionar ICE candidate para %s: %v", peer.Name, err)
 				continue
 			}
